@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -16,7 +18,27 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 	"github.com/twilio/twilio-go/twiml"
+
+	"go-it/models"
+	"go-it/services"
 )
+
+// Global map to store active call transcripts
+var (
+	activeCallsMutex sync.RWMutex
+	activeCalls      = make(map[string]*CallSession)
+)
+
+// CallSession stores session information for an active call
+type CallSession struct {
+	CallID        string
+	AgentID       string
+	StartTime     time.Time
+	Transcript    []models.Transcript
+	CallerNumber  string
+	LastActivity  time.Time
+	mutex         sync.Mutex
+}
 
 func main() {
     port := os.Getenv("PORT")
@@ -25,9 +47,22 @@ func main() {
 	}
    err := godotenv.Load()
    if err != nil {
-       log.Fatal("cannot retrieve env file")
+       log.Println("Warning: cannot retrieve env file, using environment variables")
    }
-   gin.SetMode(gin.ReleaseMode)
+   
+   // Initialize Firebase
+   firestoreClient, err := services.InitFirestore()
+   if err != nil {
+       log.Printf("Warning: Failed to initialize Firestore: %v", err)
+   } else {
+       defer firestoreClient.Close()
+       log.Println("Firestore initialized successfully")
+   }
+   
+   // Start a background goroutine to clean up inactive calls
+   go cleanupInactiveCalls()
+   
+//    gin.SetMode(gin.ReleaseMode)
    app := gin.Default()
    app.Any("/llm-websocket/:call_id", Retellwshandler)
    app.POST("/twilio-webhook/:agent_id", Twiliowebhookhandler) 
@@ -61,12 +96,28 @@ type RegisterCallResponse struct {
 
 func Twiliowebhookhandler(c *gin.Context) {
    agent_id := c.Param("agent_id")
+   callerNumber := c.PostForm("From")
 
    callinfo, err := RegisterRetellCall(agent_id)
    if err != nil {
        c.JSON(http.StatusInternalServerError, "cannot handle call atm")
        return
    }
+   
+   // Create a new call session
+   session := &CallSession{
+       CallID:       callinfo.CallID,
+       AgentID:      agent_id,
+       StartTime:    time.Now(),
+       CallerNumber: callerNumber,
+       LastActivity: time.Now(),
+       Transcript:   []models.Transcript{},
+   }
+   
+   // Store the session
+   activeCallsMutex.Lock()
+   activeCalls[callinfo.CallID] = session
+   activeCallsMutex.Unlock()
 
    twilloresponse := &twiml.VoiceStream{
        Url: "wss://api.retellai.com/audio-websocket/" + callinfo.CallID,
@@ -84,6 +135,73 @@ func Twiliowebhookhandler(c *gin.Context) {
 
    c.Header("Content-Type", "text/xml")
    c.String(http.StatusOK, twimlResult)
+}
+
+// cleanupInactiveCalls periodically checks for and removes inactive calls
+func cleanupInactiveCalls() {
+    ticker := time.NewTicker(5 * time.Minute)
+    defer ticker.Stop()
+    
+    for range ticker.C {
+        threshold := time.Now().Add(-30 * time.Minute)
+        
+        activeCallsMutex.Lock()
+        for id, session := range activeCalls {
+            if session.LastActivity.Before(threshold) {
+                // Call has been inactive for too long, store transcript and remove
+                storeCallTranscript(id, true)
+                delete(activeCalls, id)
+                log.Printf("Removed inactive call %s due to inactivity", id)
+            }
+        }
+        activeCallsMutex.Unlock()
+    }
+}
+
+// storeCallTranscript stores the call transcript in Firestore
+func storeCallTranscript(callID string, timedOut bool) {
+    activeCallsMutex.RLock()
+    session, exists := activeCalls[callID]
+    activeCallsMutex.RUnlock()
+    
+    if !exists {
+        log.Printf("Attempted to store nonexistent call: %s", callID)
+        return
+    }
+    
+    // Create call transcript record
+    endTime := time.Now()
+    callData := models.CallTranscript{
+        CallID:       callID,
+        AgentID:      session.AgentID,
+        Transcript:   session.Transcript,
+        StartTime:    session.StartTime,
+        EndTime:      endTime,
+        DurationSecs: int(endTime.Sub(session.StartTime).Seconds()),
+        CallerNumber: session.CallerNumber,
+    }
+    
+    // Store in Firestore
+    firestoreClient, err := services.GetFirestoreClient()
+    if err != nil {
+        log.Printf("Error getting Firestore client: %v", err)
+        return
+    }
+    
+    docID, err := firestoreClient.SaveCallTranscript(callData)
+    if err != nil {
+        log.Printf("Error saving call transcript to Firestore: %v", err)
+        return
+    }
+    
+    log.Printf("Call transcript stored with ID: %s", docID)
+    
+    // If the call ended normally (not timed out), remove it from active calls
+    if !timedOut {
+        activeCallsMutex.Lock()
+        delete(activeCalls, callID)
+        activeCallsMutex.Unlock()
+    }
 }
 
 func RegisterRetellCall(agent_id string) (RegisterCallResponse, error) {
@@ -142,6 +260,7 @@ type Request struct {
    Transcript      []Transcripts `json:"transcript"`
    InteractionType string        `json:"interaction_type"`
 }
+
 type Response struct {
    ResponseID      int    `json:"response_id"`
    Content         string `json:"content"`
@@ -150,6 +269,19 @@ type Response struct {
 }
 
 func Retellwshandler(c *gin.Context) {
+   callID := c.Param("call_id")
+   
+   // Verify the call is registered
+   activeCallsMutex.RLock()
+   session, exists := activeCalls[callID]
+   activeCallsMutex.RUnlock()
+   
+   if !exists {
+       log.Printf("Connection attempt for unknown call: %s", callID)
+       c.JSON(http.StatusNotFound, gin.H{"error": "Call not found"})
+       return
+   }
+   
    upgrader := websocket.Upgrader{}
 
    upgrader.CheckOrigin = func(r *http.Request) bool {
@@ -158,8 +290,15 @@ func Retellwshandler(c *gin.Context) {
 
    conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
    if err != nil {
-       log.Fatal(err)
+       log.Printf("Error upgrading connection: %v", err)
+       return
    }
+   
+   defer func() {
+       conn.Close()
+       // When connection closes, store the transcript
+       storeCallTranscript(callID, false)
+   }()
 
    response := Response{
        ResponseID:      0,
@@ -167,30 +306,70 @@ func Retellwshandler(c *gin.Context) {
        ContentComplete: true,
        EndCall:         false,
    }
+   
+   // Update the transcript with initial agent message
+   session.mutex.Lock()
+   session.Transcript = append(session.Transcript, models.Transcript{
+       Role: "agent",
+       Content: response.Content,
+   })
+   session.LastActivity = time.Now()
+   session.mutex.Unlock()
 
    err = conn.WriteJSON(response)
    if err != nil {
-       log.Fatal(err)
+       log.Printf("Error sending initial message: %v", err)
+       return
    }
 
    for {
        messageType, ms, err := conn.ReadMessage()
        if err != nil {
-           conn.Close()
-
+           log.Printf("Connection closed for call %s: %v", callID, err)
            break
        }
 
        if messageType == websocket.TextMessage {
            var msg Request
-           json.Unmarshal(ms, &msg)
+           err = json.Unmarshal(ms, &msg)
+           if err != nil {
+               log.Printf("Error unmarshaling message: %v", err)
+               continue
+           }
+           
+           // Update the session's last activity time
+           session.mutex.Lock()
+           session.LastActivity = time.Now()
+           
+           // Update the transcript with the latest messages
+           if len(msg.Transcript) > 0 {
+               // Convert and add new messages to our transcript
+               for _, entry := range msg.Transcript {
+                   // Check if this message is already in our transcript to avoid duplicates
+                   isDuplicate := false
+                   for _, existing := range session.Transcript {
+                       if existing.Role == entry.Role && existing.Content == entry.Content {
+                           isDuplicate = true
+                           break
+                       }
+                   }
+                   
+                   if !isDuplicate {
+                       session.Transcript = append(session.Transcript, models.Transcript{
+                           Role: entry.Role,
+                           Content: entry.Content,
+                       })
+                   }
+               }
+           }
+           session.mutex.Unlock()
           
-           HandleWebsocketMessages(msg, conn)
+           HandleWebsocketMessages(msg, conn, callID)
        }
    }
 }
 
-func HandleWebsocketMessages(msg Request, conn *websocket.Conn) {
+func HandleWebsocketMessages(msg Request, conn *websocket.Conn, callID string) {
    client := openai.NewClient(GetOpenAISecretKey())
 
    if msg.InteractionType == "update_only" {
@@ -211,29 +390,54 @@ func HandleWebsocketMessages(msg Request, conn *websocket.Conn) {
    if err != nil {
        log.Println(err)
        conn.Close()
+       return
    }
 
    defer stream.Close()
    var i int
+   var fullResponse string
+   
+   // Get the session to update transcript
+   activeCallsMutex.RLock()
+   session, exists := activeCalls[callID]
+   activeCallsMutex.RUnlock()
+   
+   if !exists {
+       log.Printf("Call session not found for ID: %s", callID)
+       return
+   }
+   
    for {
        response, err := stream.Recv()
        if err != nil {
            var s string
+           var shouldEndCall bool
+           
            if (errors.Is(err, io.EOF) && i == 0) || (!errors.Is(err, io.EOF)) {
                s = "[ERROR] NO RESPONSE, PLEASE RETRY"
+               shouldEndCall = true
            }
 
            if errors.Is(err, io.EOF) && i != 0 {
                s = "\n\n###### [END] ######"
+               
+               // Add the full response to the transcript when finished
+               session.mutex.Lock()
+               session.Transcript = append(session.Transcript, models.Transcript{
+                   Role: "agent",
+                   Content: fullResponse,
+               })
+               session.LastActivity = time.Now()
+               session.mutex.Unlock()
            }
+           
            airesponse := Response{
                ResponseID:      msg.ResponseID,
                Content:         s,
-               ContentComplete: false,
-               EndCall:         false,
+               ContentComplete: true,
+               EndCall:         shouldEndCall,
            }
          
-
            out, err := json.Marshal(airesponse)
            if err != nil {
                log.Println(err)
@@ -250,6 +454,7 @@ func HandleWebsocketMessages(msg Request, conn *websocket.Conn) {
        }
        if len(response.Choices) > 0 {
            s := response.Choices[0].Delta.Content
+           fullResponse += s
 
            airesponse := Response{
                ResponseID:      msg.ResponseID,

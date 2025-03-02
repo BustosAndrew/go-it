@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -528,111 +527,6 @@ type RegisterCallResponse struct {
 	CallStatus             string `json:"call_status"`
 	SampleRate             int    `json:"sample_rate"`
 	StartTimestamp         int    `json:"start_timestamp"`
-}
-
-func Twiliowebhookhandler(c *gin.Context) {
-	agent_id := c.Param("agent_id")
-	callerNumber := c.PostForm("From")
-
-	log.Printf("New call from %s to agent %s", callerNumber, agent_id)
-
-	// Use the RetellService or fall back to direct API call
-	var callID string
-	var err error
-	
-	// Try to register the call with Retell
-	request := RegisterCallRequest{
-		AgentID:                agent_id,
-		AudioEncoding:          "mulaw",
-		SampleRate:             8000,
-		AudioWebsocketProtocol: "twilio",
-	}
-
-	request_bytes, err := json.Marshal(request)
-	if err != nil {
-		log.Printf("Error marshaling request: %v", err)
-		handleCallFailure(c, agent_id, callerNumber)
-		return
-	}
-
-	payload := bytes.NewBuffer(request_bytes)
-	// Update the Retell API endpoint URL to the correct version
-	request_url := "https://api.retellai.com/v2/register-phone-call"
-	log.Printf("Using Retell API endpoint: %s", request_url)
-	
-	method := "POST"
-	bearer := "Bearer " + GetRetellAISecretKey()
-	
-	// Log API key (first few chars) to help debug auth issues
-	if len(GetRetellAISecretKey()) > 8 {
-		log.Printf("Using Retell API key starting with: %s...", GetRetellAISecretKey()[0:8])
-	} else {
-		log.Printf("WARNING: Retell API key is too short or empty")
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-	req, err := http.NewRequest(method, request_url, payload)
-	if err != nil {
-		log.Printf("Error creating request: %v", err)
-		handleCallFailure(c, agent_id, callerNumber)
-		return
-	}
-
-	req.Header.Add("Authorization", bearer)
-	req.Header.Add("Content-Type", "application/json")
-	res, err := client.Do(req)
-	if err != nil {
-		log.Printf("Error making request: %v", err)
-		handleCallFailure(c, agent_id, callerNumber)
-		return
-	}
-	defer res.Body.Close()
-
-	// Log status code for debugging
-	log.Printf("Retell API response status code: %d", res.StatusCode)
-
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		log.Printf("Error reading response: %v", err)
-		handleCallFailure(c, agent_id, callerNumber)
-		return
-	}
-
-	// Check if response is valid JSON
-	if !isValidJSON(body) {
-		log.Printf("Received non-JSON response from Retell API: %s", string(body))
-		
-		// Create an alternative websocket URL for testing if API fails
-		tempCallID := "call_" + uuid.New().String()
-		log.Printf("Using generated call ID for fallback: %s", tempCallID)
-		
-		handleSuccessfulCall(c, tempCallID, agent_id, callerNumber)
-		return
-	}
-
-	var callinfo RegisterCallResponse
-	if err := json.Unmarshal(body, &callinfo); err != nil {
-		log.Printf("Error parsing Retell API response: %v", err)
-		handleCallFailure(c, agent_id, callerNumber)
-		return
-	}
-	
-	// Log the response from Retell API
-	logInfo, _ := json.Marshal(callinfo)
-	log.Printf("Retell API response: %s", logInfo)
-	
-	// Get the call ID from the response
-	callID = callinfo.CallID
-	if callID == "" {
-		log.Printf("Retell API returned empty call ID")
-		handleCallFailure(c, agent_id, callerNumber)
-		return
-	}
-
-	// Continue with successful call handling
-	handleSuccessfulCall(c, callID, agent_id, callerNumber)
 }
 
 // handleCallFailure handles a failed Retell API call

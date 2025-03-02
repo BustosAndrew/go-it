@@ -209,17 +209,18 @@ func (fc *FirestoreClient) GetTicketByCallID(callID string) (*models.Ticket, err
 	query := fc.client.Collection(collectionName).Where("call_id", "==", callID).Limit(1)
 	docs, err := query.Documents(fc.ctx).GetAll()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error querying for ticket: %w", err)
 	}
 
 	if len(docs) == 0 {
+		// No ticket found is not an error, just return nil
 		return nil, nil
 	}
 
 	// Convert to Ticket
 	var ticket models.Ticket
 	if err := docs[0].DataTo(&ticket); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error parsing ticket data: %w", err)
 	}
 
 	return &ticket, nil

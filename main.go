@@ -81,21 +81,6 @@ func main() {
 	// gin.SetMode(gin.ReleaseMode)
 	app := gin.Default()
     
-	// CORS middleware
-	app.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
-    
 	// API endpoints
 	app.Any("/llm-websocket/:call_id", Retellwshandler)
 	app.POST("/twilio-webhook/:agent_id", Twiliowebhookhandler)
@@ -429,43 +414,45 @@ func Twiliowebhookhandler(c *gin.Context) {
 	agent_id := c.Param("agent_id")
 	callerNumber := c.PostForm("From")
 
+	log.Printf("New call from %s to agent %s", callerNumber, agent_id)
+
 	callinfo, err := RegisterRetellCall(agent_id)
 	if err != nil {
+		log.Printf("Error registering call with Retell: %v", err)
 		c.JSON(http.StatusInternalServerError, "cannot handle call atm")
 		return
 	}
+	
+	// Log the response from Retell API
+	logInfo, _ := json.Marshal(callinfo)
+	log.Printf("Retell API response: %s", logInfo)
+	
+	// Ensure we have a valid call ID and store in a local variable
+	callID := callinfo.CallID
+	if callID == "" {
+		// Generate a fallback call ID if Retell doesn't provide one
+		callID = "call_" + uuid.New().String()
+		log.Printf("Generated fallback call ID: %s", callID)
+	}
    
-	// Check if this call already has a ticket
 	firestoreClient, err := services.GetFirestoreClient()
 	var ticketID string
 	
 	if err != nil {
 		log.Printf("Error getting Firestore client: %v", err)
 	} else {
-		// First check if there's already a ticket for this call
-		ticket, err := firestoreClient.GetTicketByCallID(callinfo.CallID)
+		// Create a new ticket with our validated call ID
+		ticketID, err = firestoreClient.CreateTicketForCall(callID, agent_id, callerNumber)
 		if err != nil {
-			log.Printf("Error checking for existing ticket: %v", err)
-		}
-		
-		if ticket != nil {
-			// Use the existing ticket
-			ticketID = ticket.TicketID
-			log.Printf("Using existing ticket %s for call %s", ticketID, callinfo.CallID)
+			log.Printf("Error creating ticket: %v", err)
 		} else {
-			// Create a new ticket only if one doesn't exist
-			ticketID, err = firestoreClient.CreateTicketForCall(callinfo.CallID, agent_id, callerNumber)
-			if err != nil {
-				log.Printf("Error creating ticket: %v", err)
-			} else {
-				log.Printf("Created new ticket %s for call %s", ticketID, callinfo.CallID)
-			}
+			log.Printf("Created new ticket %s for call %s", ticketID, callID)
 		}
 	}
    
-	// Create a new call session
+	// Create a new call session with our validated call ID
 	session := &CallSession{
-		CallID:       callinfo.CallID,
+		CallID:       callID, // Use our validated callID
 		AgentID:      agent_id,
 		StartTime:    time.Now(),
 		CallerNumber: callerNumber,
@@ -476,13 +463,14 @@ func Twiliowebhookhandler(c *gin.Context) {
 		TicketID:     ticketID, // Store the ticket ID with the session
 	}
    
-	// Store the session
+	// Store the session with our validated callID
 	activeCallsMutex.Lock()
-	activeCalls[callinfo.CallID] = session
+	activeCalls[callID] = session // Use our validated callID
 	activeCallsMutex.Unlock()
 
+	// Use our validated callID for the WebSocket URL
 	twilloresponse := &twiml.VoiceStream{
-		Url: "wss://api.retellai.com/audio-websocket/" + callinfo.CallID,
+		Url: "wss://api.retellai.com/audio-websocket/" + callID, // Use our validated callID
 	}
 
 	twiliostart := &twiml.VoiceConnect{
@@ -656,8 +644,15 @@ func RegisterRetellCall(agent_id string) (RegisterCallResponse, error) {
 	}
 
 	var response RegisterCallResponse
-
-	json.Unmarshal(body, &response)
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return RegisterCallResponse{}, fmt.Errorf("error parsing Retell API response: %w", err)
+	}
+	
+	// Add validation for the response
+	if response.CallID == "" {
+		log.Printf("Warning: Retell API returned empty call ID. Raw response: %s", string(body))
+	}
 
 	return response, nil
 }
@@ -682,22 +677,67 @@ type Response struct {
 
 func Retellwshandler(c *gin.Context) {
 	callID := c.Param("call_id")
+	log.Printf("WebSocket connection attempt for call: %s", callID)
    
-	// Verify the call is registered
-	activeCallsMutex.RLock()
+	// Create an emergency session for all incoming calls
+	activeCallsMutex.Lock()
 	session, exists := activeCalls[callID]
-	activeCallsMutex.RUnlock()
-   
+	
 	if !exists {
-		log.Printf("Connection attempt for unknown call: %s", callID)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Call not found"})
-		return
+		log.Printf("Connection attempt for unknown call: %s. Creating a new session.", callID)
+		
+		// Create an emergency session for this call ID
+		session = &CallSession{
+			CallID:       callID,
+			AgentID:      "unknown",
+			StartTime:    time.Now(),
+			CallerNumber: "unknown",
+			LastActivity: time.Now(),
+			Transcript:   []models.Transcript{},
+			Summary:      "",
+			Suggestions:  []models.Suggestion{},
+		}
+		
+		// Store the emergency session
+		activeCalls[callID] = session
 	}
-   
-	upgrader := websocket.Upgrader{}
-
-	upgrader.CheckOrigin = func(r *http.Request) bool {
-		return true
+	activeCallsMutex.Unlock()
+	
+	// Try to find a ticket for this call if it doesn't have one already
+	if session.TicketID == "" {
+		firestoreClient, err := services.GetFirestoreClient()
+		if err == nil {
+			ticket, err := firestoreClient.GetTicketByCallID(callID)
+			if err == nil && ticket != nil {
+				log.Printf("Found existing ticket %s for call %s", ticket.TicketID, callID)
+				
+				activeCallsMutex.Lock()
+				session = activeCalls[callID] // Get fresh reference after unlock
+				session.TicketID = ticket.TicketID
+				session.AgentID = ticket.AgentID
+				session.CallerNumber = ticket.CallerNumber
+				activeCallsMutex.Unlock()
+				
+			} else {
+				// Create a new ticket
+				ticketID, err := firestoreClient.CreateTicketForCall(callID, "unknown", "unknown")
+				if err == nil {
+					log.Printf("Created emergency ticket %s for unknown call %s", ticketID, callID)
+					
+					activeCallsMutex.Lock()
+					session = activeCalls[callID] // Get fresh reference after unlock
+					session.TicketID = ticketID
+					activeCallsMutex.Unlock()
+				}
+			}
+		}
+	}
+	
+	// Now handle the WebSocket connection as usual
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
 	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -712,6 +752,7 @@ func Retellwshandler(c *gin.Context) {
 		storeCallTranscriptToTicket(callID, false)
 	}()
 
+	// Create the initial greeting response but don't add it to the transcript history
 	response := Response{
 		ResponseID:      0,
 		Content:         "Hello, I'm your IT support assistant. How can I help you resolve your technical issue today?",
@@ -719,23 +760,20 @@ func Retellwshandler(c *gin.Context) {
 		EndCall:         false,
 	}
    
-	// Update the transcript with initial agent message
-	session.mutex.Lock()
-	session.Transcript = append(session.Transcript, models.Transcript{
-		Role:    "agent",
-		Content: response.Content,
-	})
-	session.LastActivity = time.Now()
-	session.mutex.Unlock()
-   
-	// Broadcast the updated transcript to frontend clients
-	broadcastTranscriptUpdate(callID)
-
+	// Send the greeting to the caller, but don't save it in the transcript
 	err = conn.WriteJSON(response)
 	if err != nil {
 		log.Printf("Error sending initial message: %v", err)
 		return
 	}
+   
+	// Update the session's last activity time
+	session.mutex.Lock()
+	session.LastActivity = time.Now() 
+	session.mutex.Unlock()
+   
+	// Broadcast the updated timestamp (but no transcript update since we're not adding the greeting)
+	broadcastTranscriptUpdate(callID)
 
 	for {
 		messageType, ms, err := conn.ReadMessage()

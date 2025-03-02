@@ -1,23 +1,14 @@
 package models
 
-import "time"
-
-// CallTranscript represents a complete call record with metadata
-type CallTranscript struct {
-	CallID        string       `json:"call_id" firestore:"call_id"`
-	AgentID       string       `json:"agent_id" firestore:"agent_id"`
-	Transcript    []Transcript `json:"transcript" firestore:"transcript"`
-	StartTime     time.Time    `json:"start_time" firestore:"start_time"`
-	EndTime       time.Time    `json:"end_time" firestore:"end_time"`
-	DurationSecs  int          `json:"duration_secs" firestore:"duration_secs"`
-	CallerNumber  string       `json:"caller_number,omitempty" firestore:"caller_number,omitempty"`
-}
+import (
+	"time"
+)
 
 // Transcript represents a single message in the conversation
 type Transcript struct {
 	Role    string    `json:"role" firestore:"role"`
 	Content string    `json:"content" firestore:"content"`
-	Time    time.Time `json:"time,omitempty" firestore:"time,omitempty"` // Add timestamp
+	Time    time.Time `json:"time,omitempty" firestore:"time,omitempty"`
 }
 
 // ConnectionResponse represents a response to a frontend connection request
@@ -40,10 +31,4 @@ type TranscriptUpdate struct {
 	TicketID    string       `json:"ticket_id,omitempty"`
 	Summary     string       `json:"summary,omitempty"`
 	Suggestions []Suggestion `json:"suggestions,omitempty"`
-}
-
-// Suggestion represents a suggested solution for the caller's issue
-type Suggestion struct {
-	Title       string `json:"title" firestore:"title"`
-	Description string `json:"description" firestore:"description"`
 }

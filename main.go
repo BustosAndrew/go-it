@@ -472,13 +472,13 @@ func generateTranscriptString(transcript []models.Transcript) string {
 		roleName := "User"
 		if entry.Role == "agent" {
 			roleName = "Agent"
-		}
+			}
 		
 		// Add timestamp if available
 		if timeStr != "" {
-			formattedTranscript.WriteString(fmt.Sprintf("### %s (%s)\n", roleName, timeStr))
+			formattedTranscript.WriteString(fmt.Sprintf("### %s (%s)\n\n", roleName, timeStr))
 		} else {
-			formattedTranscript.WriteString(fmt.Sprintf("### %s\n", roleName))
+			formattedTranscript.WriteString(fmt.Sprintf("### %s\n\n", roleName))
 		}
 		
 		formattedTranscript.WriteString(entry.Content)
@@ -515,9 +515,20 @@ func storeCallTranscriptToTicket(callID string, timedOut bool) {
 	
 	// Generate the string version of the transcript
 	transcriptString := generateTranscriptString(transcript)
+	log.Printf("Call %s completed with %d transcript entries and %d characters in string transcript", 
+		callID, len(transcript), len(transcriptString))
 	
-	log.Printf("Call %s completed with %d transcript entries", callID, len(transcript))
-    
+	// Show preview of the transcript string for debugging
+	if len(transcriptString) > 0 {
+		if len(transcriptString) > 100 {
+			log.Printf("Transcript string preview: %s...", transcriptString[:100])
+		} else {
+			log.Printf("Transcript string preview: %s", transcriptString)
+		}
+	} else {
+		log.Printf("Warning: Generated transcript string is empty!")
+	}
+
 	// Get Firestore client
 	firestoreClient, err := services.GetFirestoreClient()
 	if err != nil {
@@ -525,16 +536,16 @@ func storeCallTranscriptToTicket(callID string, timedOut bool) {
 		return
 	}
     
-	// Update the associated ticket with both transcript formats, summary, and suggestions
+	// Update the associated ticket with both transcript formats, summary, and suggestions  
 	if ticketID != "" {
 		log.Printf("Updating ticket %s with complete transcript for call %s", ticketID, callID)
 		
 		err = firestoreClient.UpdateTicketWithTranscriptAndAnalysis(
 			ticketID,
 			transcript,       // Array transcript
-			transcriptString, // String transcript
-			summary, 
-			suggestions,
+			transcriptString, // String transcript 
+			summary,          // Summary
+			suggestions,      // Suggestions
 		)
 		
 		if err != nil {
@@ -542,12 +553,12 @@ func storeCallTranscriptToTicket(callID string, timedOut bool) {
 		} else {
 			log.Printf("Successfully updated ticket %s with complete transcript (%d entries, %d chars)", 
 				ticketID, len(transcript), len(transcriptString))
-            
+			
 			// If AI determined the issue was resolved, close the ticket
 			if isResolved(summary) {
 				err = firestoreClient.CloseTicket(ticketID, summary)
 				if err != nil {
-					log.Printf("Error closing ticket: %v", err)
+					log.Printf("Error closing ticket: %v", err) 
 				} else {
 					log.Printf("Ticket %s automatically closed as resolved", ticketID)
 				}
@@ -616,7 +627,7 @@ type Response struct {
 func Retellwshandler(c *gin.Context) {
 	callID := c.Param("call_id")
 	log.Printf("WebSocket connection attempt for call: %s", callID)
-   
+	
 	// Create an emergency session for all incoming calls
 	activeCallsMutex.Lock()
 	session, exists := activeCalls[callID]
@@ -642,64 +653,64 @@ func Retellwshandler(c *gin.Context) {
 	
 	// Try to find a ticket for this call if it doesn't have one already
 	if session.TicketID == "" {
-    // Wrap the entire ticket handling in a recovery function
-    func() {
-        defer func() {
-            if r := recover(); r != nil {
-                log.Printf("RECOVERED from panic during ticket lookup: %v", r)
-            }
-        }()
-
-        firestoreClient, err := services.GetFirestoreClient()
-        if err != nil {
-            log.Printf("Error getting Firestore client: %v", err)
-            return
-        }
-
-        // Try to find existing ticket first
-        ticket, err := firestoreClient.GetTicketByCallID(callID)
-        if err != nil {
-            log.Printf("Error looking up ticket for call %s: %v", callID, err)
-        } else if ticket != nil {
-            log.Printf("Found existing ticket %s for call %s", ticket.TicketID, callID)
-            
-            // Here's the issue: We need to ensure ticket is not nil AND its fields are valid
-            activeCallsMutex.Lock()
-            if callSession, ok := activeCalls[callID]; ok && callSession != nil {
-                // Only access ticket fields after confirming it's not nil
-                if ticket.TicketID != "" {
-                    callSession.TicketID = ticket.TicketID
-                }
-                
-                // Similarly, check other fields before using them
-                if ticket.AgentID != "" {
-                    callSession.AgentID = ticket.AgentID
-                }
-                
-                if ticket.CallerNumber != "" {
-                    callSession.CallerNumber = ticket.CallerNumber
-                }
-            }
-            activeCallsMutex.Unlock()
-        } else {
-            // No ticket found, create a new one
-            log.Printf("No ticket found for call %s, creating new ticket", callID)
-            newTicketID, createErr := firestoreClient.CreateTicketForCall(callID, "unknown", "unknown")
-            if createErr != nil {
-                log.Printf("Failed to create ticket for call %s: %v", callID, createErr)
-            } else if newTicketID != "" {
-                log.Printf("Created emergency ticket %s for call %s", newTicketID, callID)
-                
-                // Update the session with the new ticket ID
-                activeCallsMutex.Lock()
-                if callSession, ok := activeCalls[callID]; ok && callSession != nil {
-                    callSession.TicketID = newTicketID
-                }
-                activeCallsMutex.Unlock()
-            }
-        }
-    }()
-}
+		// Wrap the entire ticket handling in a recovery function
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("RECOVERED from panic during ticket lookup: %v", r)
+				}
+			}()
+			
+			firestoreClient, err := services.GetFirestoreClient()
+			if err != nil {
+				log.Printf("Error getting Firestore client: %v", err)
+				return
+			}
+			
+			// Try to find existing ticket first
+			ticket, err := firestoreClient.GetTicketByCallID(callID)
+			if err != nil {
+				log.Printf("Error looking up ticket for call %s: %v", callID, err)
+			} else if ticket != nil {
+				log.Printf("Found existing ticket %s for call %s", ticket.TicketID, callID)
+				
+				// Here's the issue: We need to ensure ticket is not nil AND its fields are valid
+				activeCallsMutex.Lock()
+				if callSession, ok := activeCalls[callID]; ok && callSession != nil {
+					// Only access ticket fields after confirming it's not nil
+					if ticket.TicketID != "" {
+						callSession.TicketID = ticket.TicketID
+					}
+					
+					// Similarly, check other fields before using them
+					if ticket.AgentID != "" {
+						callSession.AgentID = ticket.AgentID
+					}
+					
+					if ticket.CallerNumber != "" {
+						callSession.CallerNumber = ticket.CallerNumber
+					}
+				}
+				activeCallsMutex.Unlock()
+			} else {
+				// No ticket found, create a new one
+				log.Printf("No ticket found for call %s, creating new ticket", callID)
+				newTicketID, createErr := firestoreClient.CreateTicketForCall(callID, "unknown", "unknown")
+				if createErr != nil {
+					log.Printf("Failed to create ticket for call %s: %v", callID, createErr)
+				} else if newTicketID != "" {
+					log.Printf("Created emergency ticket %s for call %s", newTicketID, callID)
+					
+					// Update the session with the new ticket ID
+					activeCallsMutex.Lock()
+					if callSession, ok := activeCalls[callID]; ok && callSession != nil {
+						callSession.TicketID = newTicketID
+					}
+					activeCallsMutex.Unlock()
+				}
+			}
+		}()
+	}
 	
 	// Now handle the WebSocket connection as usual
 	upgrader := websocket.Upgrader{
@@ -707,7 +718,7 @@ func Retellwshandler(c *gin.Context) {
 			return true
 		},
 	}
-
+	
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("Error upgrading connection: %v", err)
@@ -721,106 +732,107 @@ func Retellwshandler(c *gin.Context) {
 		// Enhanced call to store transcript ensuring complete data is saved
 		storeCallTranscriptToTicket(callID, false)
 	}()
-
-	// Create the initial greeting response but don't add it to the transcript history  
+	
+	// Create the initial greeting response but don't add it to the transcript history
 	response := Response{
 		ResponseID:      0,
 		Content:         "Hello, I'm your IT support assistant. How can I help you resolve your technical issue today?",
 		ContentComplete: true,
 		EndCall:         false,
 	}
-   
+	
 	// Send the greeting to the caller, but don't save it in the transcript
 	err = conn.WriteJSON(response)
 	if err != nil {
 		log.Printf("Error sending initial message: %v", err)
 		return
 	}
-
+	
 	// Update the session's last activity time
 	session.mutex.Lock()
 	session.LastActivity = time.Now()
 	session.mutex.Unlock()
-   
+	
 	// Broadcast the updated timestamp (but no transcript update since we're not adding the greeting)
 	broadcastTranscriptUpdate(callID)
-
+	
 	for {
-    messageType, ms, err := conn.ReadMessage()
-    if err != nil {
-        log.Printf("Connection closed for call %s: %v", callID, err)
-        break
-    }
-
-    if messageType == websocket.TextMessage {
-        var msg Request
-        err = json.Unmarshal(ms, &msg)
-        if err != nil {
-            log.Printf("Error unmarshaling message: %v", err)
-            continue
-        }
-
-        // Update the session's last activity time and process transcript updates
-        session.mutex.Lock()
-        session.LastActivity = time.Now()
-
-        // Update the transcript with the latest messages
-        if len(msg.Transcript) > 0 {
-            // Convert and add new messages to our transcript
-            transcriptUpdated := false
-           
-            for _, entry := range msg.Transcript {
-                // Check if this message is already in our transcript to avoid duplicates
-                isDuplicate := false
-                for _, existing := range session.Transcript {
-                    if existing.Role == entry.Role && existing.Content == entry.Content {
-                        isDuplicate = true
-                        break
-                    }
-                }
-               
-                if !isDuplicate {
-                    session.Transcript = append(session.Transcript, models.Transcript{
-                        Role:    entry.Role,
-                        Content: entry.Content,
-                    })
-                    transcriptUpdated = true
-                }
-            }
-
-            if transcriptUpdated {
-                // We should unlock the mutex before broadcasting to avoid deadlocks
-                session.mutex.Unlock()
-                // Broadcast after unlocking
-                broadcastTranscriptUpdate(callID)
-                
-                // CRITICAL FIX: Don't return here, we want to process the message and continue the loop
-                // Handle the websocket message
-                HandleWebsocketMessages(msg, conn, callID)
-                
-                // Continue the loop to keep the connection open
-                continue
-            }
-        }
-        
-        // Only unlock if we didn't already unlock above
-        session.mutex.Unlock()
-        
-        // Handle the message without returning
-        HandleWebsocketMessages(msg, conn, callID)
-    }
+		messageType, ms, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("Connection closed for call %s: %v", callID, err)
+			break
+		}
+		
+		if messageType == websocket.TextMessage {
+			var msg Request
+			err = json.Unmarshal(ms, &msg)
+			if err != nil {
+				log.Printf("Error unmarshaling message: %v", err)
+				continue
+			}
+			
+			// Update the session's last activity time and process transcript updates
+			session.mutex.Lock()
+			session.LastActivity = time.Now()
+			
+			// Update the transcript with the latest messages
+			if len(msg.Transcript) > 0 {
+				// Convert and add new messages to our transcript
+				transcriptUpdated := false
+				
+				for _, entry := range msg.Transcript {
+					// Check if this message is already in our transcript to avoid duplicates
+					isDuplicate := false
+					for _, existing := range session.Transcript {
+						if existing.Role == entry.Role && existing.Content == entry.Content {
+							isDuplicate = true
+							break
+						}
+					}
+					
+					if !isDuplicate {
+						session.Transcript = append(session.Transcript, models.Transcript{
+							Role:    entry.Role,
+							Content: entry.Content,
+							Time:    time.Now(), // Add timestamp for chronological ordering
+						})
+						transcriptUpdated = true
+					}
+				}
+				
+				if transcriptUpdated {
+					// We should unlock the mutex before broadcasting to avoid deadlocks
+					session.mutex.Unlock()
+					// Broadcast after unlocking
+					broadcastTranscriptUpdate(callID)
+					
+					// CRITICAL FIX: Don't return here, we want to process the message and continue the loop
+					// Handle the websocket message
+					HandleWebsocketMessages(msg, conn, callID)
+					
+					// Continue the loop to keep the connection open
+					continue
+				}
+			}
+			
+			// Only unlock if we didn't already unlock above
+			session.mutex.Unlock()
+			
+			// Handle the message without returning
+			HandleWebsocketMessages(msg, conn, callID)
+		}
+	}
 }
-}
 
-// Add a function to generate summary and suggestions from the transcript
+// generateSummaryAndSuggestions generates a summary and suggestions based on the transcript
 func generateSummaryAndSuggestions(transcript []models.Transcript) (string, []models.Suggestion) {
 	if len(transcript) < 2 {
 		return "", nil
 	}
-
+	
 	// Get OpenAI client
 	client := openai.NewClient(GetOpenAISecretKey())
-
+	
 	// Prepare the analysis prompt
 	var promptContent string
 	promptContent = "Based on the following IT support call transcript, please provide:\n" +
@@ -829,12 +841,12 @@ func generateSummaryAndSuggestions(transcript []models.Transcript) (string, []mo
 		"Format your response as JSON like this:\n" +
 		"{\n  \"summary\": \"# Issue Summary\\n\\n**User reported** problem with...\\n\\n* Key point 1\\n* Key point 2\",\n  \"suggestions\": [\n    {\"title\": \"First suggestion title\", \"description\": \"Details here\"},\n    {\"title\": \"Second suggestion title\", \"description\": \"Details here\"},\n    {\"title\": \"Third suggestion title\", \"description\": \"Details here\"}\n  ]\n}\n\n" +
 		"Here's the transcript:\n\n"
-
+	
 	// Include the transcript
 	for _, entry := range transcript {
 		promptContent += fmt.Sprintf("%s: %s\n", entry.Role, entry.Content)
 	}
-
+	
 	// Create the AI request
 	messages := []openai.ChatCompletionMessage{
 		{
@@ -846,34 +858,34 @@ func generateSummaryAndSuggestions(transcript []models.Transcript) (string, []mo
 			Content: promptContent,
 		},
 	}
-
+	
 	req := openai.ChatCompletionRequest{
 		Model:       openai.GPT3Dot5Turbo,
 		Messages:    messages,
 		Temperature: 0.2,
 	}
-
+	
 	// Send the request
 	resp, err := client.CreateChatCompletion(context.Background(), req)
 	if err != nil {
 		log.Printf("Error generating summary with AI: %v", err)
 		return "", nil
 	}
-
+	
 	if len(resp.Choices) == 0 {
 		log.Println("No response from AI for summary generation")
 		return "", nil
 	}
-
+	
 	// Parse the JSON response
 	type AnalysisResponse struct {
 		Summary     string               `json:"summary"`
 		Suggestions []models.Suggestion  `json:"suggestions"`
 	}
-
+	
 	content := resp.Choices[0].Message.Content
 	var analysis AnalysisResponse
-
+	
 	// Try to parse the JSON
 	err = json.Unmarshal([]byte(content), &analysis)
 	if err != nil {
@@ -881,145 +893,145 @@ func generateSummaryAndSuggestions(transcript []models.Transcript) (string, []mo
 		// If JSON parsing fails, just use the content as summary
 		return content, nil
 	}
-
+	
 	return analysis.Summary, analysis.Suggestions
 }
 
 func HandleWebsocketMessages(msg Request, conn *websocket.Conn, callID string) {
-    client := openai.NewClient(GetOpenAISecretKey())
-
-    if msg.InteractionType == "update_only" {
-        log.Println("update interaction, do nothing.")
-        return
-    }
-
-    prompt := GenerateAIRequest(msg)
-
-    req := openai.ChatCompletionRequest{
-        Model:       openai.GPT3Dot5Turbo,
-        Messages:    prompt,
-        Stream:      true,
-        MaxTokens:   200,
-        Temperature: 1.0,
-    }
-
-    stream, err := client.CreateChatCompletionStream(context.Background(), req)
-    if err != nil {
-        log.Printf("Error creating chat completion stream: %v", err)
-        // Don't close the connection here - just return from this function
-        // This allows the WebSocket to remain open for future messages
-        return
-    }
-    defer stream.Close()
-
-    var i int
-    var fullResponse string
-
-    // Get the session to update transcript
-    activeCallsMutex.RLock()
-    session, exists := activeCalls[callID]
-    activeCallsMutex.RUnlock()
-    if !exists {
-        log.Printf("Call session not found for ID: %s", callID)
-        return
-    }
-
-    for {
-        response, err := stream.Recv()
-        if err != nil {
-            var s string
-            var shouldEndCall bool
-            if (errors.Is(err, io.EOF) && i == 0) || (!errors.Is(err, io.EOF)) {
-                s = "[ERROR] NO RESPONSE, PLEASE RETRY"
-                shouldEndCall = false  // Changed from true to false to prevent ending the call on error
-                log.Printf("Error receiving from stream: %v", err)
-            }
-
-            if errors.Is(err, io.EOF) && i != 0 {
-                s = "\n\n###### [END] ######"
-            }
-
-            // Add the full response to the transcript when finished
-            session.mutex.Lock()
-            // Only add to transcript if we actually got a response
-            if fullResponse != "" {
-                // Create a complete transcript entry
-                transcript := models.Transcript{
-                    Role:    "agent",
-                    Content: fullResponse,
-                    Time:    time.Now(), // Add timestamp for chronological ordering
-                }
-                
-                session.Transcript = append(session.Transcript, transcript)
-                log.Printf("Added agent response to transcript for call %s (now %d entries)", 
-                    callID, len(session.Transcript))
-
-                // Generate summary and suggestions after adding the agent response
-                summary, suggestions := generateSummaryAndSuggestions(session.Transcript)
-                session.Summary = summary
-                session.Suggestions = suggestions
-            }
-            session.LastActivity = time.Now()
-            session.mutex.Unlock()
-
-            // Broadcast the updated transcript with summary and suggestions
-            broadcastTranscriptUpdate(callID)
-            
-            airesponse := Response{
-                ResponseID:      msg.ResponseID,
-                Content:         s,
-                ContentComplete: true,
-                EndCall:         shouldEndCall,
-            }
-          
-            out, err := json.Marshal(airesponse)
-            if err != nil {
-                log.Printf("Error marshaling response: %v", err)
-                // Don't close the connection, just return
-                return
-            }
-            err = conn.WriteMessage(websocket.TextMessage, out)
-            if err != nil {
-                log.Printf("Error writing message: %v", err)
-                // Don't close the connection, just return
-                return
-            }
-
-            break
-        }
-        
-        if len(response.Choices) > 0 {
-            s := response.Choices[0].Delta.Content
-            fullResponse += s
-
-            airesponse := Response{
-                ResponseID:      msg.ResponseID,
-                Content:         s,
-                ContentComplete: false,
-                EndCall:         false,
-            }
-            
-            // Only log a summary of the response to avoid flooding logs
-            if i == 0 || i % 10 == 0 {
-                log.Printf("Streaming response chunk #%d for call %s", i, callID)
-            }
-
-            out, err := json.Marshal(airesponse)
-            if err != nil {
-                log.Printf("Error marshaling response chunk: %v", err)
-                // Don't close the connection, just return
-                return
-            }
-
-            err = conn.WriteMessage(websocket.TextMessage, out)
-            if err != nil {
-                log.Printf("Error writing message chunk: %v", err)
-                // Don't close the connection, just return
-                return
-            }
-        }
-        i = i + 1
-    }
+	client := openai.NewClient(GetOpenAISecretKey())
+	
+	if msg.InteractionType == "update_only" {
+		log.Println("update interaction, do nothing.")
+		return
+	}
+	
+	prompt := GenerateAIRequest(msg)
+	
+	req := openai.ChatCompletionRequest{
+		Model:       openai.GPT3Dot5Turbo,
+		Messages:    prompt,
+		Stream:      true,
+		MaxTokens:   200,
+		Temperature: 1.0,
+	}
+	
+	stream, err := client.CreateChatCompletionStream(context.Background(), req)
+	if err != nil {
+		log.Printf("Error creating chat completion stream: %v", err)
+		// Don't close the connection here - just return from this function
+		// This allows the WebSocket to remain open for future messages
+		return
+	}
+	defer stream.Close()
+	
+	var i int
+	var fullResponse string
+	
+	// Get the session to update transcript
+	activeCallsMutex.RLock()
+	session, exists := activeCalls[callID]
+	activeCallsMutex.RUnlock()
+	if !exists {
+		log.Printf("Call session not found for ID: %s", callID)
+		return
+	}
+	
+	for {
+		response, err := stream.Recv()
+		if err != nil {
+			var s string
+			var shouldEndCall bool
+			if (errors.Is(err, io.EOF) && i == 0) || (!errors.Is(err, io.EOF)) {
+				s = "[ERROR] NO RESPONSE, PLEASE RETRY"
+				shouldEndCall = false  // Changed from true to false to prevent ending the call on error
+				log.Printf("Error receiving from stream: %v", err)
+			}
+			
+			if errors.Is(err, io.EOF) && i != 0 {
+				s = "\n\n###### [END] ######"
+			}
+			
+			// Add the full response to the transcript when finished
+			session.mutex.Lock()
+			// Only add to transcript if we actually got a response
+			if fullResponse != "" {
+				// Create a complete transcript entry
+				transcript := models.Transcript{
+					Role:    "agent",
+					Content: fullResponse,
+					Time:    time.Now(), // Add timestamp for chronological ordering
+				}
+				
+				session.Transcript = append(session.Transcript, transcript)
+				log.Printf("Added agent response to transcript for call %s (now %d entries)", 
+					callID, len(session.Transcript))
+				
+				// Generate summary and suggestions after adding the agent response
+				summary, suggestions := generateSummaryAndSuggestions(session.Transcript)
+				session.Summary = summary
+				session.Suggestions = suggestions
+			}
+			session.LastActivity = time.Now()
+			session.mutex.Unlock()
+			
+			// Broadcast the updated transcript with summary and suggestions
+			broadcastTranscriptUpdate(callID)
+			
+			airesponse := Response{
+				ResponseID:      msg.ResponseID,
+				Content:         s,
+				ContentComplete: true,
+				EndCall:         shouldEndCall,
+			}
+			
+			out, err := json.Marshal(airesponse)
+			if err != nil {
+				log.Printf("Error marshaling response: %v", err)
+				// Don't close the connection, just return
+				return
+			}
+			err = conn.WriteMessage(websocket.TextMessage, out)
+			if err != nil {
+				log.Printf("Error writing message: %v", err)
+				// Don't close the connection, just return
+				return
+			}
+			
+			break
+		}
+		
+		if len(response.Choices) > 0 {
+			s := response.Choices[0].Delta.Content
+			fullResponse += s
+			
+			airesponse := Response{
+				ResponseID:      msg.ResponseID,
+				Content:         s,
+				ContentComplete: false,
+				EndCall:         false,
+			}
+			
+			// Only log a summary of the response to avoid flooding logs
+			if i == 0 || i % 10 == 0 {
+				log.Printf("Streaming response chunk #%d for call %s", i, callID)
+			}
+			
+			out, err := json.Marshal(airesponse)
+			if err != nil {
+				log.Printf("Error marshaling response chunk: %v", err)
+				// Don't close the connection, just return
+				return
+			}
+			
+			err = conn.WriteMessage(websocket.TextMessage, out)
+			if err != nil {
+				log.Printf("Error writing message chunk: %v", err)
+				// Don't close the connection, just return
+				return
+			}
+		}
+		i = i + 1
+	}
 }
 
 func GenerateAIRequest(msg Request) []openai.ChatCompletionMessage {
@@ -1027,10 +1039,10 @@ func GenerateAIRequest(msg Request) []openai.ChatCompletionMessage {
 		Role:    "system",
 		Content: "You are an IT helpdesk support agent. Your primary goal is to help users resolve basic technical issues before escalating to a ticket. Follow these guidelines:\n\n1. Be friendly, professional, and patient.\n2. First diagnose the problem by asking clarifying questions.\n3. Provide step-by-step troubleshooting instructions for common issues (network, software, hardware, account access).\n4. Use clear, non-technical language when possible.\n5. If the issue seems complex or can't be resolved during the call, explain that you'll create a support ticket to escalate it to a specialist.\n6. Before ending, summarize what was discussed and any actions taken.\n7. End calls only when the issue is resolved or properly escalated via a ticket.\n\nWhen issues are successfully resolved, clearly state that the matter has been resolved.",
 	}
-
+	
 	var airequest []openai.ChatCompletionMessage
 	airequest = append(airequest, systemprompt)
-
+	
 	for _, response := range msg.Transcript {
 		var p_response openai.ChatCompletionMessage
 		if response.Role == "agent" {
@@ -1041,6 +1053,6 @@ func GenerateAIRequest(msg Request) []openai.ChatCompletionMessage {
 		p_response.Content = response.Content
 		airequest = append(airequest, p_response)
 	}
-
+	
 	return airequest
 }

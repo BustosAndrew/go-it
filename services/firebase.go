@@ -118,8 +118,63 @@ func (fc *FirestoreClient) CreateTicketForCall(callID, agentID, callerNumber str
 }
 
 // UpdateTicketWithTranscriptAndAnalysis updates a ticket with transcript, summary, and suggestions
-func (fc *FirestoreClient) UpdateTicketWithTranscriptAndAnalysis(ticketID string, transcript []models.Transcript, transcriptString string, summary string, suggestions []models.Suggestion) error {
+func (fc *FirestoreClient) UpdateTicketWithTranscriptAndAnalysis(
+	ticketID string, 
+	transcript []models.Transcript, 
+	transcriptString string, 
+	summary string, 
+	suggestions []models.Suggestion,
+) error {
 	// Get the tickets collection name from environment or use default
+	collectionName := os.Getenv("FIRESTORE_TICKETS_COLLECTION")
+	if collectionName == "" {
+		collectionName = "tickets"
+	}
+
+	// Get the ticket document reference
+	ticketRef := fc.client.Collection(collectionName).Doc(ticketID)
+
+	// Check if ticket exists
+	doc, err := ticketRef.Get(fc.ctx)
+	if err != nil {
+		log.Printf("Error getting ticket %s: %v", ticketID, err)
+		return err
+	}
+
+	if !doc.Exists() {
+		return errors.New("ticket not found")
+	}
+
+	// Log data being sent to Firestore
+	log.Printf("Updating Firestore ticket %s with: %d transcript entries, %d transcript_string chars, %d suggestions", 
+		ticketID, len(transcript), len(transcriptString), len(suggestions))
+
+	// Current time for update timestamp
+	now := time.Now()
+
+	// Update the ticket with both transcript formats, summary, and suggestions
+	updates := []firestore.Update{
+		{Path: "transcript", Value: transcript},
+		{Path: "transcript_string", Value: transcriptString},
+		{Path: "summary", Value: summary},
+		{Path: "suggestions", Value: suggestions},
+		{Path: "updated_at", Value: now},
+	}
+
+	// Execute the update
+	_, err = ticketRef.Update(fc.ctx, updates)
+	if err != nil {
+		log.Printf("Error updating Firestore with ticket data: %v", err)
+	} else {
+		log.Printf("Successfully updated Firestore with ticket data for %s", ticketID)
+	}
+	
+	return err
+}
+
+// UpdateTicketTranscriptStringOnly updates just the transcript string field of a ticket
+func (fc *FirestoreClient) UpdateTicketTranscriptStringOnly(ticketID string, transcriptString string) error {
+	// Get the collection name from environment or use default
 	collectionName := os.Getenv("FIRESTORE_TICKETS_COLLECTION")
 	if collectionName == "" {
 		collectionName = "tickets"
@@ -138,19 +193,12 @@ func (fc *FirestoreClient) UpdateTicketWithTranscriptAndAnalysis(ticketID string
 		return errors.New("ticket not found")
 	}
 
-	// Current time for update timestamp
-	now := time.Now()
-
-	// Update the ticket with transcript array, string transcript, summary, and suggestions
-	updates := []firestore.Update{
-		{Path: "transcript", Value: transcript},
+	// Update just the transcript_string field
+	_, err = ticketRef.Update(fc.ctx, []firestore.Update{
 		{Path: "transcript_string", Value: transcriptString},
-		{Path: "summary", Value: summary},
-		{Path: "suggestions", Value: suggestions},
-		{Path: "updated_at", Value: now},
-	}
+		{Path: "updated_at", Value: time.Now()},
+	})
 
-	_, err = ticketRef.Update(fc.ctx, updates)
 	return err
 }
 

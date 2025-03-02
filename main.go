@@ -111,7 +111,7 @@ func main() {
 	app.GET("/api/tickets/:ticket_id", GetTicketByIDHandler)
 	app.POST("/api/tickets/:ticket_id/close", CloseTicketHandler) // New endpoint to manually close tickets
     
-	app.Run(":" + port)
+	app.Run("localhost:" + port)
 }
 
 // GetActiveCallsHandler returns a list of all active calls

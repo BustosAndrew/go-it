@@ -89,9 +89,6 @@ func main() {
     
 	// API endpoints
 	app.Any("/llm-websocket/:call_id", Retellwshandler)
-	
-	// New endpoint for direct session creation (independent of Twilio)
-	app.POST("/api/calls/create", CreateCallSessionHandler)
     
 	// New endpoint for frontend WebSocket connections
 	app.GET("/frontend-ws/:call_id", FrontendWebSocketHandler)
@@ -105,93 +102,6 @@ func main() {
 	app.POST("/api/tickets/:ticket_id/close", CloseTicketHandler)
     
 	app.Run("localhost:" + port)
-}
-
-// CreateCallSessionRequest defines the request format for creating a new call session
-type CreateCallSessionRequest struct {
-	AgentID       string `json:"agent_id" binding:"required"`
-	CallerNumber  string `json:"caller_number"`
-	CallerName    string `json:"caller_name,omitempty"`
-}
-
-// CreateCallSessionResponse defines the response format for the create call endpoint
-type CreateCallSessionResponse struct {
-	CallID        string    `json:"call_id"`
-	AgentID       string    `json:"agent_id"`
-	TicketID      string    `json:"ticket_id,omitempty"`
-	StartTime     time.Time `json:"start_time"`
-	WebSocketURL  string    `json:"websocket_url"`
-}
-
-// CreateCallSessionHandler creates a new call session without requiring Twilio
-func CreateCallSessionHandler(c *gin.Context) {
-	var request CreateCallSessionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"status": "error",
-			"error":  "Invalid request format: " + err.Error(),
-		})
-		return
-	}
-	
-	// Generate a call ID
-	callID := "call_" + uuid.New().String()
-	
-	// Create session and ticket using our extracted helper function
-	ticketID, session := createCallSession(callID, request.AgentID, request.CallerNumber)
-	
-	// Create the response
-	response := CreateCallSessionResponse{
-		CallID:       callID,
-		AgentID:      request.AgentID,
-		TicketID:     ticketID,
-		StartTime:    session.StartTime,
-		WebSocketURL: "wss://" + c.Request.Host + "/llm-websocket/" + callID,
-	}
-	
-	c.JSON(http.StatusCreated, gin.H{
-		"status": "success",
-		"call":   response,
-	})
-}
-
-// createCallSession is an extracted helper function to create a call session and ticket
-// This allows the functionality to be used by both the Twilio webhook and direct API
-func createCallSession(callID, agentID, callerNumber string) (string, *CallSession) {
-	var ticketID string
-	
-	// Create a ticket for the call
-	firestoreClient, err := services.GetFirestoreClient()
-	if err == nil {
-		ticketID, err = firestoreClient.CreateTicketForCall(callID, agentID, callerNumber)
-		if err != nil {
-			log.Printf("Error creating ticket: %v", err)
-		} else {
-			log.Printf("Created ticket %s for call %s", ticketID, callID)
-		}
-	} else {
-		log.Printf("Error getting Firestore client: %v", err)
-	}
-	
-	// Create a new call session
-	session := &CallSession{
-		CallID:       callID,
-		AgentID:      agentID,
-		StartTime:    time.Now(),
-		CallerNumber: callerNumber,
-		LastActivity: time.Now(),
-		Transcript:   []models.Transcript{},
-		Summary:      "",
-		Suggestions:  []models.Suggestion{},
-		TicketID:     ticketID,
-	}
-	
-	// Store the session
-	activeCallsMutex.Lock()
-	activeCalls[callID] = session
-	activeCallsMutex.Unlock()
-	
-	return ticketID, session
 }
 
 // GetActiveCallsHandler returns a list of all active calls

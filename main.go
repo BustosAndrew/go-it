@@ -40,7 +40,9 @@ type CallSession struct {
 	Transcript    []models.Transcript
 	CallerNumber  string
 	LastActivity  time.Time
-	TicketID      string  // Add field to store the associated ticket ID
+	Summary       string
+	Suggestions   []models.Suggestion
+	TicketID      string
 	mutex         sync.Mutex
 }
 
@@ -104,9 +106,6 @@ func main() {
 	// Endpoint to list active calls
 	app.GET("/api/calls/active", GetActiveCallsHandler)
     
-	// New endpoint to retrieve all past call transcripts
-	app.GET("/api/calls/history", GetCallHistoryHandler)
-    
 	// Add new endpoint for tickets
 	app.GET("/api/tickets", GetAllTicketsHandler)
 	app.GET("/api/tickets/:ticket_id", GetTicketByIDHandler)
@@ -131,6 +130,9 @@ func GetActiveCallsHandler(c *gin.Context) {
 			"caller_number": session.CallerNumber,
 			"last_activity": session.LastActivity,
 			"duration":      time.Since(session.StartTime).Seconds(),
+			"ticket_id":     session.TicketID,
+			"summary":       session.Summary,
+			"suggestions":   session.Suggestions,
 		}
 		activeCallsList = append(activeCallsList, callData)
 	}
@@ -138,52 +140,6 @@ func GetActiveCallsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
 		"calls":  activeCallsList,
-	})
-}
-
-// GetCallHistoryHandler returns a list of all past call transcripts
-func GetCallHistoryHandler(c *gin.Context) {
-	// Get the Firestore client
-	firestoreClient, err := services.GetFirestoreClient()
-	if err != nil {
-		log.Printf("Error getting Firestore client: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status": "error",
-			"error":  "Failed to connect to database",
-		})
-		return
-	}
-    
-	// Retrieve all call transcripts
-	transcripts, err := firestoreClient.GetAllCallTranscripts()
-	if err != nil {
-		log.Printf("Error retrieving call transcripts: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status": "error",
-			"error":  "Failed to retrieve call history",
-		})
-		return
-	}
-    
-	// Transform transcripts to a suitable response format
-	callHistory := make([]map[string]interface{}, 0, len(transcripts))
-	for _, transcript := range transcripts {
-		callData := map[string]interface{}{
-			"call_id":       transcript.CallID,
-			"agent_id":      transcript.AgentID,
-			"start_time":    transcript.StartTime,
-			"end_time":      transcript.EndTime,
-			"caller_number": transcript.CallerNumber,
-			"duration_secs": transcript.DurationSecs,
-			"transcript":    transcript.Transcript,
-		}
-		callHistory = append(callHistory, callData)
-	}
-    
-	// Return the response
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-		"calls":  callHistory,
 	})
 }
 
@@ -360,7 +316,9 @@ func FrontendWebSocketHandler(c *gin.Context) {
 			StartTime:   session.StartTime,
 			LastUpdated: session.LastActivity,
 			IsActive:    true,
-			TicketID:    session.TicketID,  // Add ticket ID to the update
+			TicketID:    session.TicketID,
+			Summary:     session.Summary,
+			Suggestions: session.Suggestions,
 		}
 		session.mutex.Unlock()
         
@@ -371,30 +329,33 @@ func FrontendWebSocketHandler(c *gin.Context) {
 		if err != nil {
 			log.Printf("Error getting Firestore client: %v", err)
 		} else {
-			transcript, err := firestoreClient.GetCallTranscript(callID)
+			ticket, err := firestoreClient.GetTicketByCallID(callID)
 			if err != nil {
-				log.Printf("Error retrieving call transcript: %v", err)
-			} else if transcript != nil {
-				 // For completed calls, get the ticket information
-				var ticketID string
-				ticket, err := firestoreClient.GetTicketByCallID(callID)
-				if err == nil && ticket != nil {
-					ticketID = ticket.TicketID
-				}
-				
-				// Send the archived transcript with ticket ID
+				log.Printf("Error retrieving ticket for call %s: %v", callID, err)
+			} else if ticket != nil {
+				// Send the ticket data
 				update := models.TranscriptUpdate{
 					Type:        "transcript_update",
-					CallID:      transcript.CallID,
-					AgentID:     transcript.AgentID,
-					Transcript:  transcript.Transcript,
-					StartTime:   transcript.StartTime,
-					LastUpdated: transcript.EndTime,
+					CallID:      ticket.CallID,
+					AgentID:     ticket.AgentID,
+					Transcript:  ticket.Transcript,
+					StartTime:   ticket.CreatedAt,
+					LastUpdated: ticket.UpdatedAt,
 					IsActive:    false,
-					TicketID:    ticketID,  // Add ticket ID to the update
+					TicketID:    ticket.TicketID,
+					Summary:     ticket.Summary,
+					Suggestions: ticket.Suggestions,
 				}
                 
 				client.Hub.Broadcast(callID, update)
+			} else {
+				// No ticket found
+				client.Hub.Broadcast(callID, models.ConnectionResponse{
+					Type:    "error",
+					Status:  "error",
+					Message: "No data found for this call ID",
+					CallID:  callID,
+				})
 			}
 		}
 	}
@@ -429,7 +390,9 @@ func broadcastTranscriptUpdate(callID string) {
 		StartTime:   session.StartTime,
 		LastUpdated: time.Now(),
 		IsActive:    true,
-		TicketID:    session.TicketID,  // Add ticket ID to the update
+		TicketID:    session.TicketID,
+		Summary:     session.Summary,
+		Suggestions: session.Suggestions,
 	}
 	session.mutex.Unlock()
     
@@ -508,6 +471,8 @@ func Twiliowebhookhandler(c *gin.Context) {
 		CallerNumber: callerNumber,
 		LastActivity: time.Now(),
 		Transcript:   []models.Transcript{},
+		Summary:      "",
+		Suggestions:  []models.Suggestion{},
 		TicketID:     ticketID, // Store the ticket ID with the session
 	}
    
@@ -545,8 +510,8 @@ func cleanupInactiveCalls() {
 		activeCallsMutex.Lock()
 		for id, session := range activeCalls {
 			if session.LastActivity.Before(threshold) {
-				// Call has been inactive for too long, store transcript and remove
-				storeCallTranscript(id, true)
+				// Call has been inactive for too long, store to ticket and remove
+				storeCallTranscriptToTicket(id, true)
 				delete(activeCalls, id)
 				log.Printf("Removed inactive call %s due to inactivity", id)
                 
@@ -559,7 +524,9 @@ func cleanupInactiveCalls() {
 					StartTime:   session.StartTime,
 					LastUpdated: time.Now(),
 					IsActive:    false,
-					TicketID:    session.TicketID,  // Add ticket ID to the update
+					TicketID:    session.TicketID,
+					Summary:     session.Summary,
+					Suggestions: session.Suggestions,
 				}
 				services.GetWebSocketHub().Broadcast(id, update)
 			}
@@ -568,8 +535,8 @@ func cleanupInactiveCalls() {
 	}
 }
 
-// storeCallTranscript stores the call transcript in Firestore and updates the associated ticket
-func storeCallTranscript(callID string, timedOut bool) {
+// storeCallTranscriptToTicket moves the call transcript to the ticket when a call ends
+func storeCallTranscriptToTicket(callID string, timedOut bool) {
 	activeCallsMutex.RLock()
 	session, exists := activeCalls[callID]
 	activeCallsMutex.RUnlock()
@@ -579,49 +546,30 @@ func storeCallTranscript(callID string, timedOut bool) {
 		return
 	}
     
-	// Create call transcript record
-	endTime := time.Now()
-	callData := models.CallTranscript{
-		CallID:       callID,
-		AgentID:      session.AgentID,
-		Transcript:   session.Transcript,
-		StartTime:    session.StartTime,
-		EndTime:      endTime,
-		DurationSecs: int(endTime.Sub(session.StartTime).Seconds()),
-		CallerNumber: session.CallerNumber,
-	}
-    
-	// Store in Firestore
+	// Get Firestore client
 	firestoreClient, err := services.GetFirestoreClient()
 	if err != nil {
 		log.Printf("Error getting Firestore client: %v", err)
 		return
 	}
     
-	// Save call transcript
-	docID, err := firestoreClient.SaveCallTranscript(callData)
-	if err != nil {
-		log.Printf("Error saving call transcript to Firestore: %v", err)
-		return
-	}
-    
-	log.Printf("Call transcript stored with ID: %s", docID)
-    
-	// Update the associated ticket with the transcript
+	// Update the associated ticket with the transcript, summary, and suggestions
 	if session.TicketID != "" {
-		// First, just update the transcript without changing status
-		err = firestoreClient.UpdateTicketWithTranscript(session.TicketID, session.Transcript)
+		err = firestoreClient.UpdateTicketWithTranscriptAndAnalysis(
+			session.TicketID, 
+			session.Transcript, 
+			session.Summary, 
+			session.Suggestions,
+		)
+		
 		if err != nil {
-			log.Printf("Error updating ticket with transcript: %v", err)
+			log.Printf("Error updating ticket with data: %v", err)
 		} else {
-			log.Printf("Ticket %s updated with call transcript", session.TicketID)
+			log.Printf("Ticket %s updated with call data", session.TicketID)
             
-			// Analyze if the issue was resolved using AI
-			resolved, resolution := analyzeTranscriptForResolution(session.Transcript)
-            
-			if resolved {
-				// If AI determined the issue was resolved, close the ticket
-				err = firestoreClient.CloseTicket(session.TicketID, resolution)
+			// If AI determined the issue was resolved, close the ticket
+			if isResolved(session.Summary) {
+				err = firestoreClient.CloseTicket(session.TicketID, session.Summary)
 				if err != nil {
 					log.Printf("Error closing ticket: %v", err)
 				} else {
@@ -646,79 +594,26 @@ func storeCallTranscript(callID string, timedOut bool) {
 			AgentID:     session.AgentID,
 			Transcript:  session.Transcript,
 			StartTime:   session.StartTime,
-			LastUpdated: endTime,
+			LastUpdated: time.Now(),
 			IsActive:    false,
-			TicketID:    session.TicketID,  // Add ticket ID to the update
+			TicketID:    session.TicketID,
+			Summary:     session.Summary,
+			Suggestions: session.Suggestions,
 		}
 		services.GetWebSocketHub().Broadcast(callID, update)
 	}
 }
 
-// analyzeTranscriptForResolution uses AI to determine if the issue was resolved
-func analyzeTranscriptForResolution(transcript []models.Transcript) (bool, string) {
-	if len(transcript) < 3 {
-		// Not enough interaction to determine resolution
-		return false, ""
+// isResolved checks if the summary indicates the issue was resolved
+func isResolved(summary string) bool {
+	if summary == "" {
+		return false
 	}
-    
-	// Get OpenAI client
-	client := openai.NewClient(GetOpenAISecretKey())
-    
-	// Prepare the analysis prompt
-	var promptContent string
-	promptContent = "This is a transcript of an IT support call. Please analyze if the issue was fully resolved. Answer with 'RESOLVED' or 'UNRESOLVED' followed by a brief summary of the issue and resolution status. If the issue was escalated to a ticket, mark it as 'UNRESOLVED'. Only mark as 'RESOLVED' if the caller's problem was actually fixed during the call.\n\n"
-    
-	// Include the transcript
-	for _, entry := range transcript {
-		promptContent += fmt.Sprintf("%s: %s\n", entry.Role, entry.Content)
-	}
-    
-	// Create the AI request
-	messages := []openai.ChatCompletionMessage{
-		{
-			Role:    "system",
-			Content: "You are an expert IT support call analyzer. Your job is to determine if a technical support issue has been completely resolved based on call transcripts, or if it requires further attention through a support ticket.",
-		},
-		{
-			Role:    "user",
-			Content: promptContent,
-		},
-	}
-    
-	req := openai.ChatCompletionRequest{
-		Model:       openai.GPT3Dot5Turbo,
-		Messages:    messages,
-		MaxTokens:   300,
-		Temperature: 0.2, // Lower temperature for more consistent and predictable results
-	}
-    
-	// Send the request
-	resp, err := client.CreateChatCompletion(context.Background(), req)
-	if err != nil {
-		log.Printf("Error analyzing transcript with AI: %v", err)
-		return false, ""
-	}
-    
-	if len(resp.Choices) == 0 {
-		log.Println("No response from AI analyzer")
-		return false, ""
-	}
-    
-	// Get the analysis result
-	analysis := resp.Choices[0].Message.Content
-    
-	// Determine if resolved based on the AI response
-	resolved := strings.HasPrefix(strings.ToUpper(analysis), "RESOLVED")
-    
-	// Extract the summary, removing the RESOLVED/UNRESOLVED prefix
-	summary := analysis
-	if idx := strings.Index(strings.ToUpper(analysis), "RESOLVED"); idx != -1 {
-		summary = strings.TrimSpace(analysis[idx+8:])
-	} else if idx := strings.Index(strings.ToUpper(analysis), "UNRESOLVED"); idx != -1 {
-		summary = strings.TrimSpace(analysis[idx+10:])
-	}
-    
-	return resolved, summary
+	
+	lowerSummary := strings.ToLower(summary)
+	return strings.Contains(lowerSummary, "resolved") || 
+		strings.Contains(lowerSummary, "fixed") ||
+		strings.Contains(lowerSummary, "solved")
 }
 
 func RegisterRetellCall(agent_id string) (RegisterCallResponse, error) {
@@ -813,8 +708,8 @@ func Retellwshandler(c *gin.Context) {
    
 	defer func() {
 		conn.Close()
-		// When connection closes, store the transcript
-		storeCallTranscript(callID, false)
+		// When connection closes, store the transcript to ticket
+		storeCallTranscriptToTicket(callID, false)
 	}()
 
 	response := Response{
@@ -900,6 +795,79 @@ func Retellwshandler(c *gin.Context) {
 	}
 }
 
+// Add a function to generate summary and suggestions from the transcript
+func generateSummaryAndSuggestions(transcript []models.Transcript) (string, []models.Suggestion) {
+	if len(transcript) < 2 {
+		return "", nil
+	}
+
+	// Get OpenAI client
+	client := openai.NewClient(GetOpenAISecretKey())
+
+	// Prepare the analysis prompt
+	var promptContent string
+	promptContent = "Based on the following IT support call transcript, please provide:\n" +
+		"1. A brief summary of the issue in Markdown format (2-3 sentences). Use appropriate markdown formatting like headings, bold text, and bullet points to highlight key points.\n" +
+		"2. Three specific suggestions for resolving the issue, each with a short title and a description\n\n" +
+		"Format your response as JSON like this:\n" +
+		"{\n  \"summary\": \"# Issue Summary\\n\\n**User reported** problem with...\\n\\n* Key point 1\\n* Key point 2\",\n  \"suggestions\": [\n    {\"title\": \"First suggestion title\", \"description\": \"Details here\"},\n    {\"title\": \"Second suggestion title\", \"description\": \"Details here\"},\n    {\"title\": \"Third suggestion title\", \"description\": \"Details here\"}\n  ]\n}\n\n" +
+		"Here's the transcript:\n\n"
+
+	// Include the transcript
+	for _, entry := range transcript {
+		promptContent += fmt.Sprintf("%s: %s\n", entry.Role, entry.Content)
+	}
+
+	// Create the AI request
+	messages := []openai.ChatCompletionMessage{
+		{
+			Role:    "system",
+			Content: "You are an expert IT support analyst that helps generate concise summaries and practical solutions. Format summaries in Markdown with appropriate headings, bullet points, and emphasis.",
+		},
+		{
+			Role:    "user",
+			Content: promptContent,
+		},
+	}
+
+	req := openai.ChatCompletionRequest{
+		Model:       openai.GPT3Dot5Turbo,
+		Messages:    messages,
+		Temperature: 0.2,
+	}
+
+	// Send the request
+	resp, err := client.CreateChatCompletion(context.Background(), req)
+	if err != nil {
+		log.Printf("Error generating summary with AI: %v", err)
+		return "", nil
+	}
+
+	if len(resp.Choices) == 0 {
+		log.Println("No response from AI for summary generation")
+		return "", nil
+	}
+
+	// Parse the JSON response
+	type AnalysisResponse struct {
+		Summary     string               `json:"summary"`
+		Suggestions []models.Suggestion  `json:"suggestions"`
+	}
+
+	content := resp.Choices[0].Message.Content
+	var analysis AnalysisResponse
+
+	// Try to parse the JSON
+	err = json.Unmarshal([]byte(content), &analysis)
+	if err != nil {
+		log.Printf("Error parsing AI response as JSON: %v", err)
+		// If JSON parsing fails, just use the content as summary
+		return content, nil
+	}
+
+	return analysis.Summary, analysis.Suggestions
+}
+
 func HandleWebsocketMessages(msg Request, conn *websocket.Conn, callID string) {
 	client := openai.NewClient(GetOpenAISecretKey())
 
@@ -959,10 +927,16 @@ func HandleWebsocketMessages(msg Request, conn *websocket.Conn, callID string) {
 					Role:    "agent",
 					Content: fullResponse,
 				})
+				
+				// Generate summary and suggestions after adding the agent response
+				summary, suggestions := generateSummaryAndSuggestions(session.Transcript)
+				session.Summary = summary
+				session.Suggestions = suggestions
+				
 				session.LastActivity = time.Now()
 				session.mutex.Unlock()
 				
-				// Broadcast the updated transcript
+				// Broadcast the updated transcript with summary and suggestions
 				broadcastTranscriptUpdate(callID)
 			}
 			

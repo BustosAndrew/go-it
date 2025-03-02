@@ -2,12 +2,6 @@ package models
 
 import "time"
 
-// Transcript represents a single message in a conversation
-type Transcript struct {
-	Role    string `json:"role" firestore:"role"`
-	Content string `json:"content" firestore:"content"`
-}
-
 // CallTranscript represents a complete call record with metadata
 type CallTranscript struct {
 	CallID        string       `json:"call_id" firestore:"call_id"`

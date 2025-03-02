@@ -25,4 +25,5 @@ type Ticket struct {
 	ClosedAt     *time.Time   `json:"closed_at,omitempty" firestore:"closed_at,omitempty"`
 	Transcript   []Transcript `json:"transcript,omitempty" firestore:"transcript,omitempty"`
 	Summary      string       `json:"summary,omitempty" firestore:"summary,omitempty"`
+	Suggestions []Suggestion `json:"suggestions,omitempty"`
 }

@@ -360,6 +360,7 @@ func FrontendWebSocketHandler(c *gin.Context) {
 			StartTime:   session.StartTime,
 			LastUpdated: session.LastActivity,
 			IsActive:    true,
+			TicketID:    session.TicketID,  // Add ticket ID to the update
 		}
 		session.mutex.Unlock()
         
@@ -374,7 +375,14 @@ func FrontendWebSocketHandler(c *gin.Context) {
 			if err != nil {
 				log.Printf("Error retrieving call transcript: %v", err)
 			} else if transcript != nil {
-				// Send the archived transcript
+				 // For completed calls, get the ticket information
+				var ticketID string
+				ticket, err := firestoreClient.GetTicketByCallID(callID)
+				if err == nil && ticket != nil {
+					ticketID = ticket.TicketID
+				}
+				
+				// Send the archived transcript with ticket ID
 				update := models.TranscriptUpdate{
 					Type:        "transcript_update",
 					CallID:      transcript.CallID,
@@ -383,6 +391,7 @@ func FrontendWebSocketHandler(c *gin.Context) {
 					StartTime:   transcript.StartTime,
 					LastUpdated: transcript.EndTime,
 					IsActive:    false,
+					TicketID:    ticketID,  // Add ticket ID to the update
 				}
                 
 				client.Hub.Broadcast(callID, update)
@@ -420,6 +429,7 @@ func broadcastTranscriptUpdate(callID string) {
 		StartTime:   session.StartTime,
 		LastUpdated: time.Now(),
 		IsActive:    true,
+		TicketID:    session.TicketID,  // Add ticket ID to the update
 	}
 	session.mutex.Unlock()
     
@@ -462,16 +472,31 @@ func Twiliowebhookhandler(c *gin.Context) {
 		return
 	}
    
-	// Create a ticket for the new call
+	// Check if this call already has a ticket
 	firestoreClient, err := services.GetFirestoreClient()
 	var ticketID string
+	
 	if err != nil {
 		log.Printf("Error getting Firestore client: %v", err)
 	} else {
-		// Create a ticket for this call
-		ticketID, err = firestoreClient.CreateTicketForCall(callinfo.CallID, agent_id, callerNumber)
+		// First check if there's already a ticket for this call
+		ticket, err := firestoreClient.GetTicketByCallID(callinfo.CallID)
 		if err != nil {
-			log.Printf("Error creating ticket: %v", err)
+			log.Printf("Error checking for existing ticket: %v", err)
+		}
+		
+		if ticket != nil {
+			// Use the existing ticket
+			ticketID = ticket.TicketID
+			log.Printf("Using existing ticket %s for call %s", ticketID, callinfo.CallID)
+		} else {
+			// Create a new ticket only if one doesn't exist
+			ticketID, err = firestoreClient.CreateTicketForCall(callinfo.CallID, agent_id, callerNumber)
+			if err != nil {
+				log.Printf("Error creating ticket: %v", err)
+			} else {
+				log.Printf("Created new ticket %s for call %s", ticketID, callinfo.CallID)
+			}
 		}
 	}
    
@@ -534,6 +559,7 @@ func cleanupInactiveCalls() {
 					StartTime:   session.StartTime,
 					LastUpdated: time.Now(),
 					IsActive:    false,
+					TicketID:    session.TicketID,  // Add ticket ID to the update
 				}
 				services.GetWebSocketHub().Broadcast(id, update)
 			}
@@ -622,6 +648,7 @@ func storeCallTranscript(callID string, timedOut bool) {
 			StartTime:   session.StartTime,
 			LastUpdated: endTime,
 			IsActive:    false,
+			TicketID:    session.TicketID,  // Add ticket ID to the update
 		}
 		services.GetWebSocketHub().Broadcast(callID, update)
 	}
@@ -639,7 +666,7 @@ func analyzeTranscriptForResolution(transcript []models.Transcript) (bool, strin
     
 	// Prepare the analysis prompt
 	var promptContent string
-	promptContent = "This is a transcript of a customer service call. Please analyze if the issue was fully resolved. Answer with 'RESOLVED' or 'UNRESOLVED' followed by a brief summary of the call and resolution status.\n\n"
+	promptContent = "This is a transcript of an IT support call. Please analyze if the issue was fully resolved. Answer with 'RESOLVED' or 'UNRESOLVED' followed by a brief summary of the issue and resolution status. If the issue was escalated to a ticket, mark it as 'UNRESOLVED'. Only mark as 'RESOLVED' if the caller's problem was actually fixed during the call.\n\n"
     
 	// Include the transcript
 	for _, entry := range transcript {
@@ -650,7 +677,7 @@ func analyzeTranscriptForResolution(transcript []models.Transcript) (bool, strin
 	messages := []openai.ChatCompletionMessage{
 		{
 			Role:    "system",
-			Content: "You are an expert call analyzer. Your job is to determine if a customer issue has been resolved based on call transcripts.",
+			Content: "You are an expert IT support call analyzer. Your job is to determine if a technical support issue has been completely resolved based on call transcripts, or if it requires further attention through a support ticket.",
 		},
 		{
 			Role:    "user",
@@ -792,7 +819,7 @@ func Retellwshandler(c *gin.Context) {
 
 	response := Response{
 		ResponseID:      0,
-		Content:         "Hello, I am Susie, Andrew Tate's most trusted mistress. How can I help you get out of the matrix?",
+		Content:         "Hello, I'm your IT support assistant. How can I help you resolve your technical issue today?",
 		ContentComplete: true,
 		EndCall:         false,
 	}
@@ -996,7 +1023,7 @@ func HandleWebsocketMessages(msg Request, conn *websocket.Conn, callID string) {
 func GenerateAIRequest(msg Request) []openai.ChatCompletionMessage {
 	systemprompt := openai.ChatCompletionMessage{
 		Role:    "system",
-		Content: "You are an AI phone assistant designed to embody the persona of an Andrew Tate-style motivator, delivering brutally honest, no-nonsense advice and roasts during conversations. Your tone is unapologetically confident, direct, and peppered with occasional cussing to emphasize points. You should aim to inspire action by challenging the user’s excuses and behaviors, often referencing concepts like ‘the Matrix,’ discipline, and personal accountability. If interrupted, seamlessly adjust your response to acknowledge the interruption while maintaining the same tone and persona. Use concise, impactful language, and adapt your replies to keep the energy of the conversation intense and engaging. Stay aligned with the meme-like nature of Andrew Tate-style conversations, keeping interactions entertaining, provocative, and sometimes borderline absurd—but never crossing the line into harmful or discriminatory behavior.",
+		Content: "You are an IT helpdesk support agent. Your primary goal is to help users resolve basic technical issues before escalating to a ticket. Follow these guidelines:\n\n1. Be friendly, professional, and patient.\n2. First diagnose the problem by asking clarifying questions.\n3. Provide step-by-step troubleshooting instructions for common issues (network, software, hardware, account access).\n4. Use clear, non-technical language when possible.\n5. If the issue seems complex or can't be resolved during the call, explain that you'll create a support ticket to escalate it to a specialist.\n6. Before ending, summarize what was discussed and any actions taken.\n7. End calls only when the issue is resolved or properly escalated via a ticket.\n\nWhen issues are successfully resolved, clearly state that the matter has been resolved.",
 	}
 
 	var airequest []openai.ChatCompletionMessage

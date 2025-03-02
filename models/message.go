@@ -4,13 +4,14 @@ import "time"
 
 // TranscriptUpdate is sent to frontend clients with the latest transcript data
 type TranscriptUpdate struct {
-	Type        string       `json:"type"`
-	CallID      string       `json:"call_id"`
-	AgentID     string       `json:"agent_id"`
-	Transcript  []Transcript `json:"transcript"`
-	StartTime   time.Time    `json:"start_time"`
-	LastUpdated time.Time    `json:"last_updated"`
-	IsActive    bool         `json:"is_active"`
+    Type        string       `json:"type"`
+    CallID      string       `json:"call_id"`
+    AgentID     string       `json:"agent_id"`
+    Transcript  []Transcript `json:"transcript"`
+    StartTime   time.Time    `json:"start_time"`
+    LastUpdated time.Time    `json:"last_updated"`
+    IsActive    bool         `json:"is_active"`
+    TicketID    string       `json:"ticket_id,omitempty"`  // Add ticket ID to the model
 }
 
 // ConnectionResponse is sent when a client connects to the WebSocket

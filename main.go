@@ -108,6 +108,9 @@ func main() {
 	app.GET("/api/tickets/:ticket_id", GetTicketByIDHandler)
 	app.POST("/api/tickets/:ticket_id/close", CloseTicketHandler)
     
+	// New endpoint to manually trigger transcript saving (for testing)
+	app.POST("/api/calls/:call_id/save-transcript", ForceTranscriptSave)
+    
 	app.Run("localhost:" + port)
 }
 
@@ -674,8 +677,47 @@ func cleanupInactiveCalls() {
 	}
 }
 
+// generateTranscriptString creates a human-readable string version of the transcript
+func generateTranscriptString(transcript []models.Transcript) string {
+	var formattedTranscript strings.Builder
+	
+	formattedTranscript.WriteString("# Call Transcript\n\n")
+	
+	for i, entry := range transcript {
+		// Format timestamp if available
+		timeStr := ""
+		if !entry.Time.IsZero() {
+			timeStr = entry.Time.Format("2006-01-02 15:04:05")
+		}
+		
+		// Format role name more user-friendly
+		roleName := "User"
+		if entry.Role == "agent" {
+			roleName = "Agent"
+		}
+		
+		// Add timestamp if available
+		if timeStr != "" {
+			formattedTranscript.WriteString(fmt.Sprintf("### %s (%s)\n", roleName, timeStr))
+		} else {
+			formattedTranscript.WriteString(fmt.Sprintf("### %s\n", roleName))
+		}
+		
+		formattedTranscript.WriteString(entry.Content)
+		
+		// Add separator between entries (except for the last one)
+		if i < len(transcript)-1 {
+			formattedTranscript.WriteString("\n\n---\n\n")
+		}
+	}
+	
+	return formattedTranscript.String()
+}
+
 // storeCallTranscriptToTicket moves the call transcript to the ticket when a call ends
 func storeCallTranscriptToTicket(callID string, timedOut bool) {
+	log.Printf("Storing transcript for call %s (timedOut: %v)", callID, timedOut)
+	
 	activeCallsMutex.RLock()
 	session, exists := activeCalls[callID]
 	activeCallsMutex.RUnlock()
@@ -684,6 +726,19 @@ func storeCallTranscriptToTicket(callID string, timedOut bool) {
 		log.Printf("Attempted to store nonexistent call: %s", callID)
 		return
 	}
+	
+	// Lock the session to ensure we get the complete transcript
+	session.mutex.Lock()
+	transcript := session.Transcript
+	summary := session.Summary
+	suggestions := session.Suggestions
+	ticketID := session.TicketID
+	session.mutex.Unlock()
+	
+	// Generate the string version of the transcript
+	transcriptString := generateTranscriptString(transcript)
+	
+	log.Printf("Call %s completed with %d transcript entries", callID, len(transcript))
     
 	// Get Firestore client
 	firestoreClient, err := services.GetFirestoreClient()
@@ -692,32 +747,38 @@ func storeCallTranscriptToTicket(callID string, timedOut bool) {
 		return
 	}
     
-	// Update the associated ticket with the transcript, summary, and suggestions
-	if session.TicketID != "" {
+	// Update the associated ticket with both transcript formats, summary, and suggestions
+	if ticketID != "" {
+		log.Printf("Updating ticket %s with complete transcript for call %s", ticketID, callID)
+		
 		err = firestoreClient.UpdateTicketWithTranscriptAndAnalysis(
-			session.TicketID,
-			session.Transcript,
-			session.Summary, 
-			session.Suggestions,
+			ticketID,
+			transcript,       // Array transcript
+			transcriptString, // String transcript
+			summary, 
+			suggestions,
 		)
 		
 		if err != nil {
 			log.Printf("Error updating ticket with data: %v", err)
 		} else {
-			log.Printf("Ticket %s updated with call data", session.TicketID)
+			log.Printf("Successfully updated ticket %s with complete transcript (%d entries, %d chars)", 
+				ticketID, len(transcript), len(transcriptString))
             
 			// If AI determined the issue was resolved, close the ticket
-			if isResolved(session.Summary) {
-				err = firestoreClient.CloseTicket(session.TicketID, session.Summary)
+			if isResolved(summary) {
+				err = firestoreClient.CloseTicket(ticketID, summary)
 				if err != nil {
 					log.Printf("Error closing ticket: %v", err)
 				} else {
-					log.Printf("Ticket %s automatically closed as resolved", session.TicketID)
+					log.Printf("Ticket %s automatically closed as resolved", ticketID)
 				}
 			} else {
-				log.Printf("Ticket %s remains open as the issue appears unresolved", session.TicketID)
+				log.Printf("Ticket %s remains open as the issue appears unresolved", ticketID)
 			}
 		}
+	} else {
+		log.Printf("Warning: Call %s has no associated ticket ID, transcript not saved", callID)
 	}
     
 	// If the call ended normally (not timed out), remove it from active calls
@@ -725,19 +786,20 @@ func storeCallTranscriptToTicket(callID string, timedOut bool) {
 		activeCallsMutex.Lock()
 		delete(activeCalls, callID)
 		activeCallsMutex.Unlock()
+		log.Printf("Call %s removed from active calls after normal completion", callID)
         
 		// Broadcast final update indicating call is complete
 		update := models.TranscriptUpdate{
 			Type:        "transcript_update",
 			CallID:      callID,
 			AgentID:     session.AgentID,
-			Transcript:  session.Transcript,
+			Transcript:  transcript,  // Use the saved transcript to ensure consistency
 			StartTime:   session.StartTime,
 			LastUpdated: time.Now(),
 			IsActive:    false,
-			TicketID:    session.TicketID,
-			Summary:     session.Summary,
-			Suggestions: session.Suggestions,
+			TicketID:    ticketID,
+			Summary:     summary,
+			Suggestions: suggestions,
 		}
 		services.GetWebSocketHub().Broadcast(callID, update)
 	}
@@ -879,9 +941,12 @@ func Retellwshandler(c *gin.Context) {
 		log.Printf("Error upgrading connection: %v", err)
 		return
 	}
+	
+	// Use a defer function to ensure transcript is saved when connection closes
 	defer func() {
+		log.Printf("WebSocket connection closing for call %s, saving transcript", callID)
 		conn.Close()
-		// When connection closes, store the transcript to ticket
+		// Enhanced call to store transcript ensuring complete data is saved
 		storeCallTranscriptToTicket(callID, false)
 	}()
 
@@ -1106,10 +1171,16 @@ func HandleWebsocketMessages(msg Request, conn *websocket.Conn, callID string) {
             session.mutex.Lock()
             // Only add to transcript if we actually got a response
             if fullResponse != "" {
-                session.Transcript = append(session.Transcript, models.Transcript{
+                // Create a complete transcript entry
+                transcript := models.Transcript{
                     Role:    "agent",
                     Content: fullResponse,
-                })
+                    Time:    time.Now(), // Add timestamp for chronological ordering
+                }
+                
+                session.Transcript = append(session.Transcript, transcript)
+                log.Printf("Added agent response to transcript for call %s (now %d entries)", 
+                    callID, len(session.Transcript))
 
                 // Generate summary and suggestions after adding the agent response
                 summary, suggestions := generateSummaryAndSuggestions(session.Transcript)
@@ -1200,4 +1271,29 @@ func GenerateAIRequest(msg Request) []openai.ChatCompletionMessage {
 	}
 
 	return airequest
+}
+
+// Add this new function to manually trigger transcript storage for testing
+func ForceTranscriptSave(c *gin.Context) {
+	callID := c.Param("call_id")
+	
+	activeCallsMutex.RLock()
+	_, exists := activeCalls[callID]
+	activeCallsMutex.RUnlock()
+	
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{
+			"status": "error",
+			"error":  "Call not found",
+		})
+		return
+	}
+	
+	// Force save the transcript
+	storeCallTranscriptToTicket(callID, false)
+	
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "Transcript saved successfully",
+	})
 }

@@ -118,7 +118,7 @@ func (fc *FirestoreClient) CreateTicketForCall(callID, agentID, callerNumber str
 }
 
 // UpdateTicketWithTranscriptAndAnalysis updates a ticket with transcript, summary, and suggestions
-func (fc *FirestoreClient) UpdateTicketWithTranscriptAndAnalysis(ticketID string, transcript []models.Transcript, summary string, suggestions []models.Suggestion) error {
+func (fc *FirestoreClient) UpdateTicketWithTranscriptAndAnalysis(ticketID string, transcript []models.Transcript, transcriptString string, summary string, suggestions []models.Suggestion) error {
 	// Get the tickets collection name from environment or use default
 	collectionName := os.Getenv("FIRESTORE_TICKETS_COLLECTION")
 	if collectionName == "" {
@@ -141,9 +141,10 @@ func (fc *FirestoreClient) UpdateTicketWithTranscriptAndAnalysis(ticketID string
 	// Current time for update timestamp
 	now := time.Now()
 
-	// Update the ticket with transcript, summary, and suggestions
+	// Update the ticket with transcript array, string transcript, summary, and suggestions
 	updates := []firestore.Update{
 		{Path: "transcript", Value: transcript},
+		{Path: "transcript_string", Value: transcriptString},
 		{Path: "summary", Value: summary},
 		{Path: "suggestions", Value: suggestions},
 		{Path: "updated_at", Value: now},

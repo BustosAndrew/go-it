@@ -20,7 +20,6 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/sashabaranov/go-openai"
-	"github.com/twilio/twilio-go/twiml"
 
 	"go-it/models"
 	"go-it/services"
@@ -94,9 +93,6 @@ func main() {
 	// New endpoint for direct session creation (independent of Twilio)
 	app.POST("/api/calls/create", CreateCallSessionHandler)
     
-	// New endpoint for SIP integration documentation
-	app.GET("/api/telephony/info", TelephonyIntegrationInfoHandler)
-    
 	// New endpoint for frontend WebSocket connections
 	app.GET("/frontend-ws/:call_id", FrontendWebSocketHandler)
     
@@ -107,9 +103,6 @@ func main() {
 	app.GET("/api/tickets", GetAllTicketsHandler)
 	app.GET("/api/tickets/:ticket_id", GetTicketByIDHandler)
 	app.POST("/api/tickets/:ticket_id/close", CloseTicketHandler)
-    
-	// New endpoint to manually trigger transcript saving (for testing)
-	app.POST("/api/calls/:call_id/save-transcript", ForceTranscriptSave)
     
 	app.Run("localhost:" + port)
 }
@@ -128,22 +121,6 @@ type CreateCallSessionResponse struct {
 	TicketID      string    `json:"ticket_id,omitempty"`
 	StartTime     time.Time `json:"start_time"`
 	WebSocketURL  string    `json:"websocket_url"`
-}
-
-// TelephonyIntegrationInfoHandler provides information about Retell's SIP integration
-func TelephonyIntegrationInfoHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-		"message": "Retell now uses SIP for telephony integration",
-		"integration_details": map[string]interface{}{
-			"method": "SIP",
-			"documentation_url": "https://docs.retellai.com/tutorials/custom-telephony-integration-guide",
-			"note": "The Twilio webhook handler is kept for backward compatibility but is deprecated",
-		},
-		"websocket_endpoint": "/llm-websocket/:call_id",
-		"frontend_websocket": "/frontend-ws/:call_id",
-		"direct_session_creation": "/api/calls/create",
-	})
 }
 
 // CreateCallSessionHandler creates a new call session without requiring Twilio
@@ -532,115 +509,6 @@ type RegisterCallResponse struct {
 	StartTimestamp         int    `json:"start_timestamp"`
 }
 
-// handleCallFailure handles a failed Retell API call
-func handleCallFailure(c *gin.Context, agent_id string, callerNumber string) {
-	// Generate a fallback call ID when Retell API fails
-	fallbackCallID := "fallback_" + uuid.New().String()
-	log.Printf("Using fallback call ID: %s", fallbackCallID)
-	
-	// Create a fallback session without relying on Retell
-	session := &CallSession{
-		CallID:       fallbackCallID,
-		AgentID:      agent_id,
-		StartTime:    time.Now(),
-		CallerNumber: callerNumber,
-		LastActivity: time.Now(),
-		Transcript:   []models.Transcript{},
-		Summary:      "",
-		Suggestions:  []models.Suggestion{},
-	}
-	
-	// Store the session
-	activeCallsMutex.Lock()
-	activeCalls[fallbackCallID] = session
-	activeCallsMutex.Unlock()
-	
-	// Try to create a ticket for the fallback call
-	firestoreClient, ferr := services.GetFirestoreClient()
-	if ferr == nil {
-		ticketID, terr := firestoreClient.CreateTicketForCall(fallbackCallID, agent_id, callerNumber)
-		if terr == nil {
-			session.TicketID = ticketID
-			log.Printf("Created fallback ticket %s for call %s", ticketID, fallbackCallID)
-		}
-	}
-	
-	// Return a friendly message to the caller
-	twimlSay := &twiml.VoiceSay{
-		Message: "We're currently experiencing technical difficulties. Please try again later.",
-		Voice:   "alice", // Using a specific voice can sometimes help with reliability
-	}
-	
-	twimlPause := &twiml.VoicePause{
-		Length: "1",
-	}
-	
-	twimlResult, _ := twiml.Voice([]twiml.Element{twimlSay, twimlPause})
-	c.Header("Content-Type", "text/xml")
-	c.String(http.StatusOK, twimlResult)
-}
-
-// handleSuccessfulCall processes a successful call registration
-func handleSuccessfulCall(c *gin.Context, callID string, agent_id string, callerNumber string) {
-	firestoreClient, err := services.GetFirestoreClient()
-	var ticketID string
-	
-	if err != nil {
-		log.Printf("Error getting Firestore client: %v", err)
-	} else {
-		// Create a new ticket with our call ID
-		ticketID, err = firestoreClient.CreateTicketForCall(callID, agent_id, callerNumber)
-		if err != nil {
-			log.Printf("Error creating ticket: %v", err)
-		} else {
-			log.Printf("Created new ticket %s for call %s", ticketID, callID)
-		}
-	}
-   
-	// Create a new call session
-	session := &CallSession{
-		CallID:       callID,
-		AgentID:      agent_id,
-		StartTime:    time.Now(),
-		CallerNumber: callerNumber,
-		LastActivity: time.Now(),
-		Transcript:   []models.Transcript{},
-		Summary:      "",
-		Suggestions:  []models.Suggestion{},
-		TicketID:     ticketID,
-	}
-   
-	// Store the session
-	activeCallsMutex.Lock()
-	activeCalls[callID] = session
-	activeCallsMutex.Unlock()
-
-	// Set up the WebSocket stream
-	twilloResponse := &twiml.VoiceStream{
-		Url: "wss://api.retellai.com/audio-websocket/" + callID,
-		// Additional stream parameters would go here if needed
-	}
-
-	// Use <Connect> with the stream
-	twilioStart := &twiml.VoiceConnect{
-		InnerElements: []twiml.Element{twilloResponse},
-	}
-
-	// Generate TwiML with all elements
-	twimlResult, err := twiml.Voice([]twiml.Element{twilioStart})
-	if err != nil {
-		log.Printf("Error generating TwiML: %v", err)
-		c.JSON(http.StatusInternalServerError, "Cannot handle call at the moment")
-		return
-	}
-
-	// Log the TwiML for debugging
-	log.Printf("Sending TwiML response for call %s: %s", callID, twimlResult)
-
-	c.Header("Content-Type", "text/xml")
-	c.String(http.StatusOK, twimlResult)
-}
-
 // cleanupInactiveCalls periodically checks for and removes inactive calls
 func cleanupInactiveCalls() {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -815,12 +683,6 @@ func isResolved(summary string) bool {
 	return strings.Contains(lowerSummary, "resolved") || 
 		strings.Contains(lowerSummary, "fixed") ||
 		strings.Contains(lowerSummary, "solved")
-}
-
-// isValidJSON checks if a byte array contains valid JSON
-func isValidJSON(data []byte) bool {
-	var js json.RawMessage
-	return json.Unmarshal(data, &js) == nil
 }
 
 type Transcripts struct {
@@ -1271,29 +1133,4 @@ func GenerateAIRequest(msg Request) []openai.ChatCompletionMessage {
 	}
 
 	return airequest
-}
-
-// Add this new function to manually trigger transcript storage for testing
-func ForceTranscriptSave(c *gin.Context) {
-	callID := c.Param("call_id")
-	
-	activeCallsMutex.RLock()
-	_, exists := activeCalls[callID]
-	activeCallsMutex.RUnlock()
-	
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{
-			"status": "error",
-			"error":  "Call not found",
-		})
-		return
-	}
-	
-	// Force save the transcript
-	storeCallTranscriptToTicket(callID, false)
-	
-	c.JSON(http.StatusOK, gin.H{
-		"status":  "success",
-		"message": "Transcript saved successfully",
-	})
 }
